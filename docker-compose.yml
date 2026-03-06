@@ -19,7 +19,7 @@ services:
       start_period: 15s
 
   openclaw-gateway:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw
     depends_on:
       ollama:
@@ -28,12 +28,14 @@ services:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-/opt/openclaw}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-/opt/openclaw/workspace}:/home/node/.openclaw/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
     init: true
     restart: unless-stopped
     security_opt:
@@ -67,9 +69,10 @@ services:
       traefik.http.routers.openclaw.tls: "true"
       traefik.http.routers.openclaw.middlewares: "ip-allowlist@file,secure-headers@file"
       traefik.http.services.openclaw.loadbalancer.server.port: "18789"
+      traefik.http.services.openclaw.loadbalancer.server.scheme: "http"
 
   openclaw-cli:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw-cli
     network_mode: "service:openclaw-gateway"
     cap_drop:
@@ -81,7 +84,11 @@ services:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
       BROWSER: echo
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-/opt/openclaw}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-/opt/openclaw/workspace}:/home/node/.openclaw/workspace
