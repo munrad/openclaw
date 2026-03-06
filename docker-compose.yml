@@ -19,8 +19,7 @@ services:
       start_period: 15s
 
   openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -30,20 +29,18 @@ services:
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR:-/opt/openclaw}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-/opt/openclaw/workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
       - /var/run/docker.sock:/var/run/docker.sock
     init: true
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     command:
       [
         "node",
         "dist/index.js",
         "gateway",
         "--bind",
-        "lan",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
         "--port",
         "18789",
       ]
@@ -69,8 +66,7 @@ services:
       traefik.http.services.openclaw.loadbalancer.server.scheme: "http"
 
   openclaw-cli:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw-cli
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     network_mode: "service:openclaw-gateway"
     cap_drop:
       - NET_RAW
@@ -87,8 +83,8 @@ services:
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR:-/opt/openclaw}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-/opt/openclaw/workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
     stdin_open: true
     tty: true
     init: true
