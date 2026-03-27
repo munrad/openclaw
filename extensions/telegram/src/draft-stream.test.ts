@@ -321,6 +321,44 @@ describe("createTelegramDraftStream", () => {
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("classifies ambiguous draft materialize network errors as retained", async () => {
+    const api = createMockDraftApi();
+    api.sendMessage.mockRejectedValueOnce(new Error("timeout: request timed out after 30000ms"));
+    const stream = createDraftStream(api, {
+      thread: { id: 42, scope: "dm" },
+      previewTransport: "draft",
+    });
+
+    stream.update("Hello");
+    await stream.flush();
+    const result = await stream.prepareFinalization?.("Hello");
+
+    expect(result).toEqual({ kind: "retained" });
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    const clearCall = api.sendMessageDraft.mock.calls.find((call) => call[2] === "");
+    expect(clearCall).toBeUndefined();
+  });
+
+  it("clears the dm draft bubble before definite materialize fallback", async () => {
+    const api = createMockDraftApi();
+    const preConnectErr = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    api.sendMessage.mockRejectedValueOnce(preConnectErr);
+    const stream = createDraftStream(api, {
+      thread: { id: 42, scope: "dm" },
+      previewTransport: "draft",
+    });
+
+    stream.update("Hello");
+    await stream.flush();
+    const result = await stream.prepareFinalization?.("Hello");
+
+    expect(result).toEqual({ kind: "fallback" });
+    const draftCalls = api.sendMessageDraft.mock.calls;
+    const clearCall = draftCalls.find((call) => call[2] === "");
+    expect(clearCall).toBeDefined();
+    expect(clearCall?.[3]).toEqual({ message_thread_id: 42 });
+  });
+
   it("does not edit or delete messages after DM draft stream finalization", async () => {
     const api = createMockDraftApi();
     const stream = createThreadedDraftStream(api, { id: 42, scope: "dm" });

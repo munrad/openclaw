@@ -194,7 +194,8 @@ export function createLaneTextDeliverer(params: CreateLaneTextDelivererParams) {
     return (
       isDraftPreviewLane(lane) &&
       !hasPreviewButtons &&
-      typeof lane.stream?.materialize === "function"
+      (typeof lane.stream?.prepareFinalization === "function" ||
+        typeof lane.stream?.materialize === "function")
     );
   };
 
@@ -202,13 +203,29 @@ export function createLaneTextDeliverer(params: CreateLaneTextDelivererParams) {
     lane: DraftLaneState;
     laneName: LaneName;
     text: string;
-  }): Promise<number | undefined> => {
+  }): Promise<{ kind: "finalized"; messageId: number } | { kind: "retained" } | undefined> => {
     const stream = args.lane.stream;
     if (!stream || !isDraftPreviewLane(args.lane)) {
       return undefined;
     }
-    // Draft previews have no message_id to edit; materialize the final text
-    // into a real message and treat that as the finalized delivery.
+    if (typeof stream.prepareFinalization === "function") {
+      const preparation = await stream.prepareFinalization(args.text);
+      if (preparation.kind === "retained") {
+        args.lane.lastPartialText = args.text;
+        params.markDelivered();
+        return { kind: "retained" };
+      }
+      if (preparation.kind === "finalized") {
+        args.lane.lastPartialText = args.text;
+        params.markDelivered();
+        return { kind: "finalized", messageId: preparation.messageId };
+      }
+      params.log(
+        `telegram: ${args.laneName} draft preview materialize requested fallback to standard send`,
+      );
+      return undefined;
+    }
+    // Back-compat path for older stream implementations.
     stream.update(args.text);
     const materializedMessageId = await stream.materialize?.();
     if (typeof materializedMessageId !== "number") {
@@ -219,7 +236,7 @@ export function createLaneTextDeliverer(params: CreateLaneTextDelivererParams) {
     }
     args.lane.lastPartialText = args.text;
     params.markDelivered();
-    return materializedMessageId;
+    return { kind: "finalized", messageId: materializedMessageId };
   };
 
   const tryEditPreviewMessage = async (args: {
@@ -521,17 +538,21 @@ export function createLaneTextDeliverer(params: CreateLaneTextDelivererParams) {
           }
         }
         if (canMaterializeDraftFinal(lane, previewButtons)) {
-          const materializedMessageId = await tryMaterializeDraftPreviewForFinal({
+          const materialized = await tryMaterializeDraftPreviewForFinal({
             lane,
             laneName,
             text,
           });
-          if (typeof materializedMessageId === "number") {
+          if (materialized?.kind === "finalized") {
             markActivePreviewComplete(laneName);
             return result("preview-finalized", {
               content: text,
-              messageId: materializedMessageId,
+              messageId: materialized.messageId,
             });
+          }
+          if (materialized?.kind === "retained") {
+            markActivePreviewComplete(laneName);
+            return result("preview-retained");
           }
         }
         const previewMessageId = lane.stream?.messageId();

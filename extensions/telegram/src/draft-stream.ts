@@ -1,7 +1,11 @@
 import type { Bot } from "grammy";
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-lifecycle";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./bot/helpers.js";
-import { isSafeToRetrySendError, isTelegramClientRejection } from "./network-errors.js";
+import {
+  isRecoverableTelegramNetworkError,
+  isSafeToRetrySendError,
+  isTelegramClientRejection,
+} from "./network-errors.js";
 
 const TELEGRAM_STREAM_MAX_CHARS = 4096;
 const DEFAULT_THROTTLE_MS = 1000;
@@ -73,6 +77,10 @@ function shouldFallbackFromDraftTransport(err: unknown): boolean {
   return DRAFT_METHOD_UNAVAILABLE_RE.test(text) || DRAFT_CHAT_UNSUPPORTED_RE.test(text);
 }
 
+export type TelegramDraftFinalizationResult =
+  | { kind: "finalized"; messageId: number }
+  | { kind: "retained" | "fallback" };
+
 export type TelegramDraftStream = {
   update: (text: string) => void;
   flush: () => Promise<void>;
@@ -82,6 +90,11 @@ export type TelegramDraftStream = {
   lastDeliveredText?: () => string;
   clear: () => Promise<void>;
   stop: () => Promise<void>;
+  /**
+   * Draft-transport only: classify finalization so callers can avoid duplicate
+   * fallback sends after ambiguous post-connect materialize errors.
+   */
+  prepareFinalization?: (text: string) => Promise<TelegramDraftFinalizationResult>;
   /** Convert the current draft preview into a permanent message (sendMessage). */
   materialize?: () => Promise<number | undefined>;
   /** Reset internal state so the next update creates a new message instead of editing. */
@@ -395,23 +408,27 @@ export function createTelegramDraftStream(params: {
     loop.resetThrottleWindow();
   };
 
-  /**
-   * Materialize the current draft into a permanent message.
-   * For draft transport: sends the accumulated text as a real sendMessage.
-   * For message transport: the message is already permanent (noop).
-   * Returns the permanent message id, or undefined if nothing to materialize.
-   */
-  const materialize = async (): Promise<number | undefined> => {
-    await stop();
-    // If using message transport, the streamMessageId is already a real message.
-    if (previewTransport === "message" && typeof streamMessageId === "number") {
-      return streamMessageId;
+  const clearDraftPreviewBestEffort = async (usedThreadParams?: boolean) => {
+    if (resolvedDraftApi == null || streamDraftId == null) {
+      return;
     }
-    // For draft transport, use the rendered snapshot first so parse_mode stays
-    // aligned with the text being materialized.
+    const clearDraftId = streamDraftId;
+    const clearThreadParams =
+      usedThreadParams && threadParams?.message_thread_id != null
+        ? { message_thread_id: threadParams.message_thread_id }
+        : undefined;
+    try {
+      await resolvedDraftApi(chatId, clearDraftId, "", clearThreadParams);
+    } catch {
+      // Best-effort cleanup; draft clear failure is cosmetic.
+    }
+  };
+
+  const materializeDraftPreview = async (): Promise<TelegramDraftFinalizationResult> => {
+    await stop();
     const renderedText = lastSentText || lastDeliveredText;
     if (!renderedText) {
-      return undefined;
+      return { kind: "fallback" };
     }
     const renderedParseMode = lastSentText ? lastSentParseMode : undefined;
     try {
@@ -424,28 +441,57 @@ export function createTelegramDraftStream(params: {
       const sentId = sent?.message_id;
       if (typeof sentId === "number" && Number.isFinite(sentId)) {
         streamMessageId = Math.trunc(sentId);
-        // Clear the draft so Telegram's input area doesn't briefly show a
-        // stale copy alongside the newly materialized real message.
-        if (resolvedDraftApi != null && streamDraftId != null) {
-          const clearDraftId = streamDraftId;
-          const clearThreadParams =
-            usedThreadParams && threadParams?.message_thread_id != null
-              ? { message_thread_id: threadParams.message_thread_id }
-              : undefined;
-          try {
-            await resolvedDraftApi(chatId, clearDraftId, "", clearThreadParams);
-          } catch {
-            // Best-effort cleanup; draft clear failure is cosmetic.
-          }
-        }
-        return streamMessageId;
+        await clearDraftPreviewBestEffort(usedThreadParams);
+        return { kind: "finalized", messageId: streamMessageId };
       }
+      await clearDraftPreviewBestEffort(usedThreadParams);
+      params.warn?.("telegram stream preview materialize succeeded without a message id; falling back");
+      return { kind: "fallback" };
     } catch (err) {
+      if (isSafeToRetrySendError(err) || isTelegramClientRejection(err)) {
+        await clearDraftPreviewBestEffort(threadParams?.message_thread_id != null);
+        return { kind: "fallback" };
+      }
+      if (isRecoverableTelegramNetworkError(err, { allowMessageMatch: true })) {
+        params.warn?.(
+          `telegram stream preview materialize may have landed despite network error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { kind: "retained" };
+      }
       params.warn?.(
         `telegram stream preview materialize failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return { kind: "retained" };
     }
-    return undefined;
+  };
+
+  const prepareFinalization = async (text: string): Promise<TelegramDraftFinalizationResult> => {
+    const trimmed = text.trimEnd();
+    if (!trimmed) {
+      return { kind: "fallback" };
+    }
+    if (previewTransport !== "draft") {
+      return { kind: "fallback" };
+    }
+    if (trimmed !== lastDeliveredText) {
+      update(text);
+    }
+    return materializeDraftPreview();
+  };
+
+  /**
+   * Materialize the current draft into a permanent message.
+   * For draft transport: sends the accumulated text as a real sendMessage.
+   * For message transport: the message is already permanent (noop).
+   * Returns the permanent message id, or undefined if nothing to materialize.
+   */
+  const materialize = async (): Promise<number | undefined> => {
+    if (previewTransport === "message") {
+      await stop();
+      return typeof streamMessageId === "number" ? streamMessageId : undefined;
+    }
+    const result = await materializeDraftPreview();
+    return result.kind === "finalized" ? result.messageId : undefined;
   };
 
   params.log?.(`telegram stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
@@ -459,6 +505,7 @@ export function createTelegramDraftStream(params: {
     lastDeliveredText: () => lastDeliveredText,
     clear,
     stop,
+    prepareFinalization,
     materialize,
     forceNewMessage,
     sendMayHaveLanded: () => messageSendAttempted && typeof streamMessageId !== "number",

@@ -351,7 +351,7 @@ describe("createLaneTextDeliverer", () => {
 
     expect(expectPreviewFinalized(result)).toEqual({ content: "Hello final", messageId: 321 });
     expect(harness.flushDraftLane).toHaveBeenCalled();
-    expect(answerStream.materialize).toHaveBeenCalledTimes(1);
+    expect(answerStream.prepareFinalization).toHaveBeenCalledWith("Hello final");
     expect(harness.sendPayload).not.toHaveBeenCalled();
     expect(harness.markDelivered).toHaveBeenCalledTimes(1);
   });
@@ -379,14 +379,14 @@ describe("createLaneTextDeliverer", () => {
     });
 
     expect(expectPreviewFinalized(result)).toEqual({ content: "Final answer", messageId: 654 });
-    expect(answerStream.materialize).toHaveBeenCalledTimes(1);
+    expect(answerStream.prepareFinalization).toHaveBeenCalledWith("Final answer");
     expect(harness.sendPayload).not.toHaveBeenCalled();
     expect(harness.markDelivered).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to normal send when draft materialize returns no message id", async () => {
+  it("falls back to normal send when draft materialize requests fallback", async () => {
     const answerStream = createTestDraftStream({ previewMode: "draft" });
-    answerStream.materialize.mockResolvedValue(undefined);
+    answerStream.prepareFinalization.mockResolvedValue({ kind: "fallback" });
     const harness = createHarness({
       answerStream: answerStream as DraftLaneState["stream"],
       answerHasStreamedMessage: true,
@@ -396,13 +396,30 @@ describe("createLaneTextDeliverer", () => {
     const result = await deliverFinalAnswer(harness, HELLO_FINAL);
 
     expect(result.kind).toBe("sent");
-    expect(answerStream.materialize).toHaveBeenCalledTimes(1);
+    expect(answerStream.prepareFinalization).toHaveBeenCalledWith(HELLO_FINAL);
     expect(harness.sendPayload).toHaveBeenCalledWith(
       expect.objectContaining({ text: HELLO_FINAL }),
     );
     expect(harness.log).toHaveBeenCalledWith(
-      expect.stringContaining("draft preview materialize produced no message id"),
+      expect.stringContaining("draft preview materialize requested fallback to standard send"),
     );
+  });
+
+  it("retains preview when draft finalization reports ambiguous delivery", async () => {
+    const answerStream = createTestDraftStream({ previewMode: "draft" });
+    answerStream.prepareFinalization.mockResolvedValue({ kind: "retained" });
+    const harness = createHarness({
+      answerStream: answerStream as DraftLaneState["stream"],
+      answerHasStreamedMessage: true,
+      answerLastPartialText: "Hello final",
+    });
+
+    const result = await deliverFinalAnswer(harness, HELLO_FINAL);
+
+    expect(result.kind).toBe("preview-retained");
+    expect(answerStream.prepareFinalization).toHaveBeenCalledWith(HELLO_FINAL);
+    expect(harness.sendPayload).not.toHaveBeenCalled();
+    expect(harness.markDelivered).toHaveBeenCalledTimes(1);
   });
 
   it("does not use DM draft final shortcut for media payloads", async () => {
